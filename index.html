@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lua Script Generator</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
+        textarea { width: 80%; height: 200px; margin-bottom: 10px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h2>Lua Script Generator</h2>
+    <textarea id="textInput" placeholder="Enter Lua code here..."></textarea><br>
+    <button onclick="downloadScript()">Download Lua File</button>
+    <p>After downloading, manually upload the file to your <b>scripts</b> folder in your GitHub repository.</p>
+
+    <script>
+        function downloadScript() {
+            const text = document.getElementById("textInput").value;
+            if (!text.trim()) {
+                alert("Please enter Lua code.");
+                return;
+            }
+
+            // Generate a unique filename
+            const fileName = Math.random().toString(36).substr(2, 10) + ".lua";
+
+            // Add protection message
+            const luaScript = `if game:GetService("HttpService"):JSONEncode({}) then print("Unauthorized to see the link") return end\n\n` + text;
+
+            // Create a Blob and initiate download
+            const blob = new Blob([luaScript], { type: "text/plain" });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = fileName;
+            link.click();
+
+            alert("Download complete! Upload the file to your GitHub repository inside the 'scripts' folder.");
+        }
+    </script>
+</body>
+</html>
