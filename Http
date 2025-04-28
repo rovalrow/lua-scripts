@@ -1,0 +1,507 @@
+--[[
+    Advanced HttpSpy v2.0.0
+    Features:
+    - HTTP Request/Response Tracking
+    - Variable/Environment Tracking
+    - Function Call Tracking
+    - Script Source Tracking
+    - Memory Usage Monitoring
+]]
+
+if rconsoleprint then
+    rconsoleprint("https://eleutheri.com - #1 Whitelist Service\n\n")
+end;
+
+assert(syn or http, "Unsupported exploit (should support syn.request or http.request)");
+
+local options = ({...})[1] or { 
+    AutoDecode = true, 
+    Highlighting = true, 
+    SaveLogs = true, 
+    CLICommands = true, 
+    ShowResponse = true, 
+    BlockedURLs = {}, 
+    API = true,
+    TrackVariables = true,
+    TrackFunctions = true,
+    TrackMemory = true,
+    TrackScriptSources = true,
+    VariableBlacklist = {} -- Variables to ignore
+};
+
+local version = "v2.0.0";
+local logname = string.format("%d-%s-log.txt", game.PlaceId, os.date("%d_%m_%y"));
+local varlogname = string.format("%d-%s-varlog.txt", game.PlaceId, os.date("%d_%m_%y"));
+
+if options.SaveLogs then
+    writefile(logname, string.format("Http Logs from %s\n\n", os.date("%d/%m/%y"))) 
+    if options.TrackVariables then
+        writefile(varlogname, string.format("Variable Logs from %s\n\n", os.date("%d/%m/%y")))
+    end
+end;
+
+local Serializer = loadstring(game:HttpGet("https://raw.githubusercontent.com/NotDSF/leopard/main/rbx/leopard-syn.lua"))();
+local clonef = clonefunction;
+local pconsole = clonef(rconsoleprint);
+local format = clonef(string.format);
+local gsub = clonef(string.gsub);
+local match = clonef(string.match);
+local append = clonef(appendfile);
+local Type = clonef(type);
+local crunning = clonef(coroutine.running);
+local cwrap = clonef(coroutine.wrap);
+local cresume = clonef(coroutine.resume);
+local cyield = clonef(coroutine.yield);
+local Pcall = clonef(pcall);
+local Pairs = clonef(pairs);
+local Error = clonef(error);
+local getnamecallmethod = clonef(getnamecallmethod);
+local getgenv = clonef(getgenv);
+local getrenv = clonef(getrenv);
+local getreg = clonef(getreg);
+local getinfo = clonef(debug.getinfo);
+local getupvalues = clonef(debug.getupvalues);
+local getupvalue = clonef(debug.getupvalue);
+local getlocals = clonef(debug.getlocals);
+local getconstants = clonef(debug.getconstants);
+local blocked = options.BlockedURLs;
+local varBlacklist = options.VariableBlacklist;
+local enabled = true;
+local reqfunc = (syn or http).request;
+local libtype = syn and "syn" or "http";
+local hooked = {};
+local proxied = {};
+local trackedVars = {};
+local trackedFuncs = {};
+local methods = {
+    HttpGet = not syn,
+    HttpGetAsync = not syn,
+    GetObjects = true,
+    HttpPost = not syn,
+    HttpPostAsync = not syn
+}
+
+-- Memory tracking variables
+local lastMemoryCheck = os.clock();
+local memoryCheckInterval = 10; -- Check memory every 10 seconds
+local lastMemoryUsage = 0;
+
+Serializer.UpdateConfig({ highlighting = options.Highlighting });
+
+local RecentCommit = game.HttpService:JSONDecode(game:HttpGet("https://api.github.com/repos/NotDSF/HttpSpy/commits?per_page=1&path=init.lua"))[1].commit.message;
+local OnRequest = Instance.new("BindableEvent");
+local OnVariableChange = Instance.new("BindableEvent");
+local OnFunctionCall = Instance.new("BindableEvent");
+local OnMemoryUpdate = Instance.new("BindableEvent");
+local OnScriptSource = Instance.new("BindableEvent");
+
+local function printf(...) 
+    if options.SaveLogs then
+        append(logname, gsub(format(...), "%\27%[%d+m", ""));
+    end;
+    return pconsole(format(...));
+end;
+
+local function varprintf(...) 
+    if options.SaveLogs and options.TrackVariables then
+        append(varlogname, gsub(format(...), "%\27%[%d+m", ""));
+    end;
+    return pconsole(format(...));
+end;
+
+local function ConstantScan(constant)
+    for i,v in Pairs(getgc(true)) do
+        if type(v) == "function" and islclosure(v) and getfenv(v).script == getfenv(saveinstance).script and table.find(debug.getconstants(v), constant) then
+            return v;
+        end;
+    end;
+end;
+
+local function DeepClone(tbl, cloned)
+    cloned = cloned or {};
+
+    for i,v in Pairs(tbl) do
+        if Type(v) == "table" then
+            cloned[i] = DeepClone(v);
+            continue;
+        end;
+        cloned[i] = v;
+    end;
+
+    return cloned;
+end;
+
+local function SafeSerialize(value)
+    local valueType = Type(value)
+    if valueType == "function" or valueType == "userdata" or valueType == "thread" then
+        return format("[%s: %s]", valueType, tostring(value))
+    elseif valueType == "table" then
+        local success, result = Pcall(Serializer.Serialize, value)
+        if success then
+            return result
+        else
+            return "[table: serialization failed]"
+        end
+    else
+        local success, result = Pcall(Serializer.Serialize, value)
+        if success then
+            return result
+        else
+            return tostring(value)
+        end
+    end
+end
+
+-- Variable tracking system
+local function SetupVariableTracking()
+    if not options.TrackVariables then return end
+
+    varprintf("=== STARTING VARIABLE TRACKING ===\n\n");
+    
+    -- Track global environment variables
+    local env = getgenv()
+    local metaEnv = getrawmetatable(env)
+    local originalIndex = metaEnv.__index
+    local originalNewIndex = metaEnv.__newindex
+    
+    metaEnv.__index = newcclosure(function(self, key)
+        local value = originalIndex(self, key)
+        if not varBlacklist[key] and Type(key) == "string" then
+            if not trackedVars[key] or trackedVars[key] ~= value then
+                trackedVars[key] = value
+                varprintf("[VAR] Access - %s = %s\n", key, SafeSerialize(value))
+                OnVariableChange:Fire(key, value, "access")
+            end
+        end
+        return value
+    end)
+    
+    metaEnv.__newindex = newcclosure(function(self, key, value)
+        if not varBlacklist[key] and Type(key) == "string" then
+            varprintf("[VAR] Changed - %s = %s\n", key, SafeSerialize(value))
+            trackedVars[key] = value
+            OnVariableChange:Fire(key, value, "changed")
+        end
+        return originalNewIndex(self, key, value)
+    end)
+    
+    varprintf("Global environment monitoring enabled\n")
+end
+
+-- Function call tracking
+local function SetupFunctionTracking()
+    if not options.TrackFunctions then return end
+    
+    varprintf("=== STARTING FUNCTION TRACKING ===\n\n");
+    
+    -- Track functions in _G
+    for name, func in Pairs(_G) do
+        if Type(func) == "function" and not trackedFuncs[func] then
+            local success, originalFunction = Pcall(hookfunction, func, function(...)
+                local args = {...}
+                local caller = getinfo(2, "n")
+                varprintf("[FUNC] Called %s from %s with args: %s\n", 
+                    name, 
+                    caller.name or "unknown", 
+                    Serializer.FormatArguments(...))
+                OnFunctionCall:Fire(name, args)
+                return originalFunction(...)
+            end)
+            
+            if success then
+                trackedFuncs[func] = true
+                varprintf("[FUNC] Hooked function: %s\n", name)
+            end
+        end
+    end
+    
+    varprintf("Function tracking enabled\n")
+end
+
+-- Memory usage monitoring
+local function MonitorMemory()
+    if not options.TrackMemory then return end
+    
+    varprintf("=== STARTING MEMORY MONITORING ===\n\n");
+    
+    spawn(function()
+        while true do
+            if os.clock() - lastMemoryCheck >= memoryCheckInterval then
+                local currentMemory = stats().NetworkServerStatsItem["Data Received"].Total
+                local memoryDiff = currentMemory - lastMemoryUsage
+                
+                varprintf("[MEMORY] Current: %.2f KB, Change: %s%.2f KB\n", 
+                    currentMemory / 1024,
+                    memoryDiff >= 0 and "+" or "",
+                    memoryDiff / 1024)
+                
+                OnMemoryUpdate:Fire(currentMemory, memoryDiff)
+                
+                lastMemoryUsage = currentMemory
+                lastMemoryCheck = os.clock()
+            end
+            wait(1)
+        end
+    end)
+    
+    varprintf("Memory monitoring enabled\n")
+end
+
+-- Script source tracking
+local function SetupScriptSourceTracking()
+    if not options.TrackScriptSources then return end
+    
+    varprintf("=== STARTING SCRIPT SOURCE TRACKING ===\n\n");
+    
+    local oldGetScripts = getscripts
+    getscripts = function()
+        local scripts = oldGetScripts()
+        for _, script in Pairs(scripts) do
+            if script:IsA("LocalScript") or script:IsA("ModuleScript") then
+                local source = decompile(script)
+                if source then
+                    varprintf("[SCRIPT] Found script: %s\n%s\n\n", 
+                        script:GetFullName(), 
+                        string.sub(source, 1, 100) .. (string.len(source) > 100 and "..." or ""))
+                    OnScriptSource:Fire(script, source)
+                end
+            end
+        end
+        return scripts
+    end
+    
+    -- Hook script creation
+    local oldInstanceNew = Instance.new
+    Instance.new = newcclosure(function(className, parent)
+        local instance = oldInstanceNew(className, parent)
+        if (className == "LocalScript" or className == "ModuleScript") and instance then
+            varprintf("[SCRIPT] New script created: %s\n", instance:GetFullName())
+            OnScriptSource:Fire(instance, "CREATED")
+        end
+        return instance
+    end)
+    
+    varprintf("Script source tracking enabled\n")
+end
+
+local __namecall, __request;
+__namecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod();
+
+    if methods[method] then
+        printf("game:%s(%s)\n\n", method, Serializer.FormatArguments(...));
+    end;
+
+    return __namecall(self, ...);
+end));
+
+__request = hookfunction(reqfunc, newcclosure(function(req) 
+    if Type(req) ~= "table" then return __request(req); end;
+    
+    local RequestData = DeepClone(req);
+    if not enabled then
+        return __request(req);
+    end;
+
+    if Type(RequestData.Url) ~= "string" then return __request(req) end;
+
+    if not options.ShowResponse then
+        printf("%s.request(%s)\n\n", libtype, Serializer.Serialize(RequestData));
+        return __request(req);
+    end;
+
+    local t = crunning();
+    cwrap(function() 
+        if RequestData.Url and blocked[RequestData.Url] then
+            printf("%s.request(%s) -- blocked url\n\n", libtype, Serializer.Serialize(RequestData));
+            return cresume(t, {});
+        end;
+
+        if RequestData.Url then
+            local Host = string.match(RequestData.Url, "https?://(%w+.%w+)/");
+            if Host and proxied[Host] then
+                RequestData.Url = gsub(RequestData.Url, Host, proxied[Host], 1);
+            end; 
+        end;
+
+        OnRequest:Fire(RequestData);
+
+        local ok, ResponseData = Pcall(__request, RequestData); -- I know of a detection with this
+        if not ok then
+            Error(ResponseData, 0);
+        end;
+
+        local BackupData = {};
+        for i,v in Pairs(ResponseData) do
+            BackupData[i] = v;
+        end;
+
+        if BackupData.Headers and BackupData.Headers["Content-Type"] and match(BackupData.Headers["Content-Type"], "application/json") and options.AutoDecode then
+            local body = BackupData.Body;
+            local ok, res = Pcall(game.HttpService.JSONDecode, game.HttpService, body);
+            if ok then
+                BackupData.Body = res;
+            end;
+        end;
+
+        printf("%s.request(%s)\n\nResponse Data: %s\n\n", libtype, Serializer.Serialize(RequestData), Serializer.Serialize(BackupData));
+        cresume(t, hooked[RequestData.Url] and hooked[RequestData.Url](ResponseData) or ResponseData);
+    end)();
+    return cyield();
+end));
+
+if request then
+    replaceclosure(request, reqfunc);
+end;
+
+if syn and syn.websocket then
+    local WsConnect, WsBackup = debug.getupvalue(syn.websocket.connect, 1);
+    WsBackup = hookfunction(WsConnect, function(...) 
+        printf("syn.websocket.connect(%s)\n\n", Serializer.FormatArguments(...));
+        return WsBackup(...);
+    end);
+end;
+
+-- I already know this will make some people mad :troll:
+if syn and syn.websocket then
+    local HttpGet;
+    HttpGet = hookfunction(getupvalue(ConstantScan("ZeZLm2hpvGJrD6OP8A3aEszPNEw8OxGb"), 2), function(self, ...) 
+        printf("game.HttpGet(game, %s)\n\n", Serializer.FormatArguments(...));
+        return HttpGet(self, ...);
+    end);
+
+    local HttpPost;
+    HttpPost = hookfunction(getupvalue(ConstantScan("gpGXBVpEoOOktZWoYECgAY31o0BlhOue"), 2), function(self, ...) 
+        printf("game.HttpPost(game, %s)\n\n", Serializer.FormatArguments(...));
+        return HttpPost(self, ...);
+    end);
+end
+
+for method, enabled in Pairs(methods) do
+    if enabled then
+        local b;
+        b = hookfunction(game[method], newcclosure(function(self, ...) 
+            printf("game.%s(game, %s)\n\n", method, Serializer.FormatArguments(...));
+            return b(self, ...);
+        end));
+    end;
+end;
+
+-- Initialize all tracking systems
+SetupVariableTracking();
+SetupFunctionTracking();
+MonitorMemory();
+SetupScriptSourceTracking();
+
+if not debug.info(2, "f") then
+    pconsole("You are running an outdated version, please use the loadstring at https://github.com/NotDSF/HttpSpy\n");
+end;
+
+pconsole(format("Advanced HttpSpy %s (Extended by AI, Original by: https://github.com/NotDSF)\n", version));
+pconsole("Features Enabled:\n");
+pconsole(format("\tHTTP Tracking: \27[32m%s\27[0m\n", "Yes"));
+pconsole(format("\tVariable Tracking: \27[32m%s\27[0m\n", options.TrackVariables and "Yes" or "No"));
+pconsole(format("\tFunction Tracking: \27[32m%s\27[0m\n", options.TrackFunctions and "Yes" or "No"));
+pconsole(format("\tMemory Monitoring: \27[32m%s\27[0m\n", options.TrackMemory and "Yes" or "No"));
+pconsole(format("\tScript Source Tracking: \27[32m%s\27[0m\n", options.TrackScriptSources and "Yes" or "No"));
+pconsole(format("Logs are automatically being saved to: \27[32m%s\27[0m\n", options.SaveLogs and logname or "(Logs disabled)"));
+if options.TrackVariables and options.SaveLogs then
+    pconsole(format("Variable logs are being saved to: \27[32m%s\27[0m\n", varlogname));
+end
+pconsole("\nChange Logs:\n\t" .. RecentCommit .. "\n\n");
+
+if not options.API then return end;
+
+local API = {};
+API.OnRequest = OnRequest.Event;
+API.OnVariableChange = OnVariableChange.Event;
+API.OnFunctionCall = OnFunctionCall.Event;
+API.OnMemoryUpdate = OnMemoryUpdate.Event;
+API.OnScriptSource = OnScriptSource.Event;
+
+function API:HookSynRequest(url, hook) 
+    hooked[url] = hook;
+end;
+
+function API:ProxyHost(host, proxy) 
+    proxied[host] = proxy;
+end;
+
+function API:RemoveProxy(host) 
+    if not proxied[host] then
+        error("host isn't proxied", 0);
+    end;
+    proxied[host] = nil;
+end;
+
+function API:UnHookSynRequest(url) 
+    if not hooked[url] then
+        error("url isn't hooked", 0);
+    end;
+    hooked[url] = nil;
+end
+
+function API:BlockUrl(url) 
+    blocked[url] = true;
+end;
+
+function API:WhitelistUrl(url) 
+    blocked[url] = false;
+end;
+
+function API:TrackVariable(varName)
+    if varBlacklist[varName] then
+        varBlacklist[varName] = nil;
+        varprintf("[CONFIG] Now tracking variable: %s\n", varName);
+        return true;
+    end
+    return false; -- Already tracking
+end;
+
+function API:IgnoreVariable(varName)
+    if not varBlacklist[varName] then
+        varBlacklist[varName] = true;
+        varprintf("[CONFIG] Now ignoring variable: %s\n", varName);
+        return true;
+    end
+    return false; -- Already ignoring
+end;
+
+function API:GetTrackedVariables()
+    return trackedVars;
+end;
+
+function API:SetMemoryCheckInterval(seconds)
+    if Type(seconds) == "number" and seconds > 0 then
+        memoryCheckInterval = seconds;
+        varprintf("[CONFIG] Memory check interval set to %d seconds\n", seconds);
+        return true;
+    end
+    return false;
+end;
+
+function API:ToggleVariableTracking(enabled)
+    options.TrackVariables = enabled;
+    varprintf("[CONFIG] Variable tracking %s\n", enabled and "enabled" or "disabled");
+    return true;
+end;
+
+function API:ToggleFunctionTracking(enabled)
+    options.TrackFunctions = enabled;
+    varprintf("[CONFIG] Function tracking %s\n", enabled and "enabled" or "disabled");
+    return true;
+end;
+
+function API:ToggleMemoryMonitoring(enabled)
+    options.TrackMemory = enabled;
+    varprintf("[CONFIG] Memory monitoring %s\n", enabled and "enabled" or "disabled");
+    return true;
+end;
+
+function API:ToggleScriptSourceTracking(enabled)
+    options.TrackScriptSources = enabled;
+    varprintf("[CONFIG] Script source tracking %s\n", enabled and "enabled" or "disabled");
+    return true;
+end;
+
+return API;
