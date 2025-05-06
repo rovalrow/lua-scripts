@@ -1,0 +1,146 @@
+local api = loadstring(game:HttpGet("https://sdkapi-public.luarmor.net/library.lua"))()
+api.script_id = "3a73d46d1525c2923a60f1ec05f37ddd" -- Replace with your actual Script ID
+
+local WindUI = loadstring(game:HttpGet("https://tree-hub.vercel.app/api/UI/WindUI"))()
+
+local Window = WindUI:CreateWindow({
+    Title = "Key System",
+    Icon = "laptop",
+    Author = "By Shinzou",
+    Folder = "Shinz",
+    Size = UDim2.fromOffset(100, 100),
+    Transparent = true,
+    Theme = "Dark",
+    UserEnabled = false,
+    SideBarWidth = 200,
+    HasOutline = true,
+})
+
+Window:EditOpenButton({
+    Title = "Key System",
+    Icon = "laptop",
+    CornerRadius = UDim.new(0,10),
+    StrokeThickness = 2,
+    Color = ColorSequence.new(
+        Color3.fromHex("#FF0000"),
+        Color3.fromHex("#000000")
+    ),
+    Position = UDim2.new(0.5, 0, 0, 30),
+    Enabled = true,
+    Draggable = false,
+})
+
+WindUI:AddTheme({
+    Name = "RedBlack",
+    Accent = "#000000",
+    Outline = "#FF0000",
+    Text = "#FFFFFF",
+    PlaceholderText = "#888888"
+})
+WindUI:SetTheme("RedBlack")
+
+local valid = Window:Tab({
+    Title = "Enter Key",
+    Icon = "folder-key",
+})
+
+local inkey = Window:Tab({
+    Title = "Get Key",
+    Icon = "chrome",
+})
+
+local keyinp = valid:Input({
+    Title = "Enter Key",
+    Desc = "This is where you put your copied key",
+    Value = savedKey,
+    PlaceholderText = "eg. Vskwjefksowurgofid",
+    ClearTextOnFocus = false,
+    Callback = function(Text)
+        savedKey = Text
+    end
+})
+
+local check = valid:Button({
+    Title = "Check Key",
+    Desc = "To Check The Key?",
+    Callback = function()
+        if savedKey ~= "" then
+            writefile("__SHINZOU_KEY__", savedKey)
+
+            local status = api.check_key(savedKey)
+            print(status)
+
+            if status.code == "KEY_VALID" then
+                ui:SetBanner("Welcome. Seconds left: " .. (status.data.auth_expire - os.time()))
+                ui:UpdateTitle("Total executions: ", status.data.total_executions)
+
+                Window:Dialog({
+                    Title = "Success",
+                    Content = "Key verified successfully!",
+                    Buttons = {
+                        { Title = "OK", Callback = function() print("Key accepted") end }
+                    }
+                }):Open()
+
+                getgenv().script_key = savedKey
+                api.load_script() -- Executes Luarmor-protected script
+
+            elseif status.code == "KEY_HWID_LOCKED" then
+                Window:Dialog({
+                    Title = "HWID Locked",
+                    Content = "Key is locked to another device. Please reset it using the Luarmor bot.",
+                    Buttons = {
+                        { Title = "OK", Callback = function() end }
+                    }
+                }):Open()
+
+            elseif status.code == "KEY_INCORRECT" then
+                Window:Dialog({
+                    Title = "Invalid Key",
+                    Content = "The key you entered is incorrect or deleted.",
+                    Buttons = {
+                        { Title = "OK", Callback = function() end }
+                    }
+                }):Open()
+
+            else
+                player:Kick("Key check failed: " .. status.message .. " Code: " .. status.code)
+            end
+        else
+            warn("No key entered.")
+        end
+    end,
+})
+
+local getke = inkey:Button({
+    Title = "Get Key",
+    Desc = "Click this to get your key",
+    Callback = function()
+        Window:Dialog({
+            Title = "Key System",
+            Content = "If clicked Confirm, paste the copied link in Chrome and complete the following tasks",
+            Buttons = {
+                { Title = "Confirm", Callback = function() setclipboard(Pelinda.GetKeyLink({ Service = __PELINDA_SERVICE__ })) end },
+                { Title = "Cancel", Callback = function() print("cancel") end },
+            }
+        }):Open()
+    end
+})
+
+local buykey = inkey:Button({
+    Title = "Buy Key",
+    Desc = "Click this if you want to purchase a permanent key",
+    Callback = function()
+        Window:Dialog({
+            Title = "Key System",
+            Content = "After clicking Confirm -- paste the copied link on chrome",
+            Buttons = {
+                { Title = "Confirm", Callback = function() 
+                    setclipboard("https://discord.gg/aR8q88xGaT") 
+                end },
+                { Title = "Cancel", Callback = function() print("cancel") end }
+            }
+        }):Open()
+    end
+})
+-- he
