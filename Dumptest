@@ -10,7 +10,7 @@
     FullLuaDumper v1.1
     ▸ Constant / up-value / proto / VM byte-code dumper
     ▸ Optional HTTP-request dump (kept for compatibility)
-    ▸ MoonSec-style “[table]:{ … }” output
+    ▸ MoonSec-style "[table]:{ … }" output
 ===============================================================]]
 
 ----------------------------------------------------------------
@@ -32,22 +32,53 @@ local tag       = os.date("%d_%m_%y")
 local logName   = string.format("%d-%s-log.txt",  game.PlaceId, tag)
 local dumpName  = string.format("%d-%s-dump.txt", game.PlaceId, tag)
 
-if options.SaveLogs and not isfile(logName)  then writefile(logName,"") end
-if                    not isfile(dumpName)   then writefile(dumpName,"") end
+-- Check if filesystem functions exist
+if not isfile or not writefile or not appendfile then
+    warn("Missing required filesystem functions! This script requires an executor with file I/O capabilities.")
+    return
+end
+
+-- Check for file existence with pcall to avoid errors
+local function safeIsFile(filename)
+    local success = pcall(function() return isfile(filename) end)
+    return success and isfile(filename) or false
+end
+
+local function safeWriteFile(filename, content)
+    pcall(function() writefile(filename, content) end)
+end
+
+local function safeAppendFile(filename, content)
+    pcall(function() appendfile(filename, content) end)
+end
+
+if options.SaveLogs and not safeIsFile(logName) then safeWriteFile(logName, "") end
+if not safeIsFile(dumpName) then safeWriteFile(dumpName, "") end
 
 ----------------------------------------------------------------
 --  ▸ Fast clones & helpers
 ----------------------------------------------------------------
-local cf, rf = clonefunction, rconsoleprint
+local cf = function(f) return type(clonefunction) == "function" and clonefunction(f) or f end
+local rf = function(...) 
+    if rconsoleprint then 
+        return rconsoleprint(...) 
+    else 
+        return print(...) 
+    end 
+end
+
 local printf = cf(rf)
-local append = cf(appendfile)
+local append = cf(function(file, content) safeAppendFile(file, content) end)
 local format = cf(string.format)
 local Type   = cf(type)
 local wait25 = function() task.wait(0.025) end
 
 local function logf(fmt, ...)
     local msg = format(fmt, ...)
-    if options.SaveLogs then append(logName, (msg:gsub("%%\27%[%d+m",""))) end
+    if options.SaveLogs then 
+        local cleanMsg = msg:gsub("%%\27%[%d+m", "")
+        append(logName, cleanMsg) 
+    end
     return printf(msg)
 end
 
@@ -55,6 +86,8 @@ end
 --  ▸ MoonSec-style serializer
 ----------------------------------------------------------------
 local function ToMoon(t, depth, seen)
+    if Type(t) ~= "table" then return tostring(t) end
+    
     depth, seen = depth or 0, seen or {}
     if seen[t] then return "[table]:{ --[[cycle]] }" end
     seen[t] = true
@@ -75,7 +108,7 @@ local function ToMoon(t, depth, seen)
 
         table.insert(out, ",\n")
         if index % 50 == 0 then wait25() end
-        index += 1
+        index = index + 1
     end
     table.insert(out, pad.."}")
     return table.concat(out)
@@ -84,64 +117,196 @@ end
 ----------------------------------------------------------------
 --  ▸ VM helpers
 ----------------------------------------------------------------
-local bytes = function(s) local t={} for i=1,#s do t[i]=s:byte(i) end return t end
-local getuv     = getupvalue      or debug.getupvalue
-local getconst  = debug.getconstants
-local getproto  = debug.getprotos or function()return{} end
+local function checkDebugLibrary()
+    if not debug then
+        logf("[Error] Debug library is not available!\n")
+        return false
+    end
+    
+    -- Check required debug functions
+    local required = {
+        "getconstants", 
+        "getupvalue"
+    }
+    
+    for _, funcName in ipairs(required) do
+        if not debug[funcName] and not getfenv(0)[funcName] then
+            logf("[Warning] Missing debug function: %s\n", funcName)
+        end
+    end
+    
+    return true
+end
+
+local function bytes(s) 
+    if type(s) ~= "string" then return {} end
+    local t = {} 
+    for i = 1, #s do 
+        t[i] = s:byte(i) 
+    end 
+    return t 
+end
+
+local getuv = function(f, i)
+    if getupvalue then 
+        return getupvalue(f, i)
+    elseif debug.getupvalue then
+        return debug.getupvalue(f, i)
+    end
+    return nil
+end
+
+local getconst = function(f)
+    if debug.getconstants then
+        return debug.getconstants(f)
+    end
+    return {}
+end
+
+local getproto = function(f)
+    if debug.getprotos then
+        return debug.getprotos(f)
+    end
+    return {}
+end
+
+local islclosure = function(f)
+    if islclosure then
+        return islclosure(f)
+    elseif checkclosure then
+        return not checkclosure(f)
+    end
+    return type(f) == "function"
+end
 
 local function DumpFunction(fn, pool)
-    if not islclosure(fn) or pool[fn] then return "<seen>" end
-    pool[fn]=true
+    if type(fn) ~= "function" or not islclosure(fn) or pool[fn] then return "<seen>" end
+    pool[fn] = true
+    
     local d = {
-        Constants = getconst(fn),
+        Constants = pcall(getconst, fn) and getconst(fn) or {},
         Upvalues  = {},
         Protos    = {},
-        Bytecode  = bytes(string.dump(fn)),
+        Bytecode  = pcall(string.dump, fn) and bytes(string.dump(fn)) or {},
     }
-    for i=1,math.huge do
-        local n,val = getuv(fn,i); if not n then break end
+    
+    -- Get upvalues safely
+    for i = 1, 255 do
+        local n, val = pcall(getuv, fn, i) and getuv(fn, i) or nil
+        if not n then break end
         d.Upvalues[n] = val
     end
-    for i,p in ipairs(getproto(fn)) do
-        if Type(p)=="function" then d.Protos[i]=DumpFunction(p,pool) end
+    
+    -- Get protos safely
+    local protos = pcall(getproto, fn) and getproto(fn) or {}
+    for i, p in ipairs(protos) do
+        if Type(p) == "function" then 
+            d.Protos[i] = DumpFunction(p, pool) 
+        end
     end
+    
     return d
 end
 
 local function BuildDump(v)
-    local seen,pool,root = {},{},{}
-    local function recur(val,slot)
-        if Type(val)=="table" then
-            local new={} root[slot]=new seen[val]=new
-            for k,x in pairs(val) do recur(x,k) end
-        elseif Type(val)=="function" then
-            root[slot]=DumpFunction(val,pool)
+    local seen, pool, root = {}, {}, {}
+    local function recur(val, slot)
+        if Type(val) == "table" then
+            local new = {} 
+            root[slot] = new 
+            seen[val] = new
+            for k, x in pairs(val) do 
+                pcall(function() recur(x, k) end)
+            end
+        elseif Type(val) == "function" then
+            root[slot] = DumpFunction(val, pool)
         else
-            root[slot]=val
+            root[slot] = val
         end
     end
-    recur(v,1) ; return root
+    
+    pcall(function() recur(v, 1) end)
+    return root
 end
 
-local function DumpToFile(tag,val)
-    append(dumpName, format("\n--[%s]----------------------------------------\n%s\n",
-           tag, ToMoon(BuildDump(val))))
+local function DumpToFile(tag, val)
+    local success, dumpData = pcall(function() 
+        return ToMoon(BuildDump(val)) 
+    end)
+    
+    if success then
+        append(dumpName, format("\n--[%s]----------------------------------------\n%s\n",
+               tag, dumpData))
+    else
+        logf("[Error] Failed to dump %s: %s\n", tag, dumpData)
+    end
 end
 
 ----------------------------------------------------------------
 --  ▸ getgc dumper
 ----------------------------------------------------------------
 local function DumpAllGC()
-    logf("[Dumper] Walking getgc …\n")
-    for _,v in next, getgc(true) do
-        if   Type(v)=="function" then DumpToFile("getgc_fn", v)
-        elseif Type(v)=="table"
-           or Type(v)=="string"  then DumpToFile("getgc_val",v) end
+    if not getgc then
+        logf("[Error] getgc function not available! Cannot dump garbage collector.\n")
+        return
     end
-    logf("[Dumper] getgc dump complete.\n")
+    
+    logf("[Dumper] Walking getgc...\n")
+    local count = 0
+    
+    pcall(function()
+        for _, v in next, getgc(true) do
+            if Type(v) == "function" then 
+                DumpToFile("getgc_fn_" .. count, v)
+                count = count + 1
+            elseif Type(v) == "table" or Type(v) == "string" then 
+                DumpToFile("getgc_val_" .. count, v)
+                count = count + 1
+            end
+            
+            if count % 100 == 0 then
+                wait25()
+                logf("[Dumper] Processed %d objects...\n", count)
+            end
+        end
+    end)
+    
+    logf("[Dumper] getgc dump complete. Processed %d objects.\n", count)
 end
 
-if options.DumpGCOnStart then DumpAllGC() end
+----------------------------------------------------------------
+--  ▸ Validate environment and required functions
+----------------------------------------------------------------
+local function validateEnvironment()
+    local required = {
+        "getgc", "hookfunction", "newcclosure"
+    }
+    
+    local missing = {}
+    for _, funcName in ipairs(required) do
+        if not getfenv(0)[funcName] then
+            table.insert(missing, funcName)
+        end
+    end
+    
+    if #missing > 0 then
+        logf("[Warning] Missing functions: %s\n", table.concat(missing, ", "))
+        logf("[Warning] Some features may not work properly!\n")
+    end
+    
+    return checkDebugLibrary()
+}
+
+-- Initialize the dumper
+local isValid = validateEnvironment()
+if not isValid then
+    logf("[Error] Critical functions missing! The dumper may not work correctly.\n")
+end
+
+-- Run GC dump if enabled
+if isValid and options.DumpGCOnStart then 
+    DumpAllGC() 
+end
 
 ----------------------------------------------------------------
 --  ▸ (Optional) HTTP-request dump  ─ keeps original behaviour
@@ -150,23 +315,32 @@ if options.DumpOnRequest and hookfunction then
     local reqfunc = (syn and syn.request)
                  or (http and http.request)
                  or rawget(getfenv(0), "request")
+    
     if reqfunc then
         local blocked = {}
-        for _,u in ipairs(options.BlockedURLs) do blocked[u]=true end
+        for _, u in ipairs(options.BlockedURLs) do blocked[u] = true end
 
-        hookfunction(reqfunc, newcclosure(function(req)
-            if Type(req)~="table" or Type(req.Url)~="string" then
-                return reqfunc(req)
-            end
-            if blocked[req.Url] then return reqfunc(req) end
+        local hookSuccess, hookError = pcall(function()
+            hookfunction(reqfunc, newcclosure(function(req)
+                if Type(req) ~= "table" or Type(req.Url) ~= "string" then
+                    return reqfunc(req)
+                end
+                if blocked[req.Url] then return reqfunc(req) end
 
-            logf("[HTTP] %s\n", req.Url)
-            local ok,resp = pcall(reqfunc, req)
-            if not ok then error(resp,0) end
-            DumpToFile("http_request", req)
-            if resp then DumpToFile("http_response", resp) end
-            return resp
-        end))
+                logf("[HTTP] %s\n", req.Url)
+                local ok, resp = pcall(reqfunc, req)
+                if not ok then error(resp, 0) end
+                
+                pcall(function() DumpToFile("http_request", req) end)
+                if resp then pcall(function() DumpToFile("http_response", resp) end) end
+                
+                return resp
+            end))
+        end)
+        
+        if not hookSuccess then
+            logf("[Error] Failed to hook HTTP request function: %s\n", hookError)
+        end
     else
         logf("[!] No request function found; HTTP dump disabled.\n")
     end
@@ -178,7 +352,7 @@ end
 logf("\n\27[36mFullLuaDumper %s\27[0m ready. Output => %s\n\n", ver, dumpName)
 
 return {
-    Dump     = function(_,v,tag) DumpToFile(tag or "manual", v) end,
+    Dump     = function(_, v, tag) pcall(function() DumpToFile(tag or "manual", v) end) end,
     DumpGC   = DumpAllGC,
     Log      = logf
 }
