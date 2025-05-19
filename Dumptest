@@ -1,270 +1,262 @@
---[[
-   MoonSec/Luraph Script Dumper
-   Simple usage: 
-   loadstring(game:HttpGet("YOUR_RAW_URL"))({
-      script = "your obfuscated script here", -- The script to deobfuscate (required)
-      format = "moonsec", -- Format type: "moonsec", "luraph", or "auto" (default)
-      saveFile = true, -- Whether to save the dump to a file (default: true)
-      verbose = true -- Whether to print additional information (default: true)
-   })
-]]
+--[[=============================================================
+    HttpDumper v0.2
+    ▸ based on HttpSpy v1.1.3 by NotDSF
+    ▸ adds constant / up-value / byte-code dumping
+    ▸ produces MoonSec-style “[table]:{ … }” files
+    ▸ github.com/your-fork/HttpDumper   (if you plan to host)
+===============================================================]]
 
--- Helper functions for working with Luau bytecode
-local bit = bit or bit32 or {
-    band = function(a,b) return a & b end,
-    bor = function(a,b) return a | b end,
-    lshift = function(a,b) return a << b end,
-    rshift = function(a,b) return a >> b end
+--───────────────────────────────────────────────────────────────
+--  ▸ Options
+--───────────────────────────────────────────────────────────────
+local options = ({...})[1] or {
+    AutoDecode       = true,   -- JSON-decode bodies automatically
+    Highlighting     = true,   -- keep HttpSpy’s ANSI colours
+    SaveLogs         = true,   -- keep HttpSpy’s rolling console log
+    CLICommands      = true,
+    ShowResponse     = true,
+    API              = true,
+
+    -- dumper-specific
+    DumpGCOnStart    = true,   -- walk all of getgc(true) once at launch
+    DumpOnRequest    = true,   -- additionally dump data returned by each request
+    BlockedURLs      = {},     -- same as HttpSpy
 }
 
--- Function to generate random string for filenames
-local function RandomString(length)
-    local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local result = ""
-    for i = 1, length do
-        local rand = math.random(1, #chars)
-        result = result .. string.sub(chars, rand, rand)
-    end
-    return result
+--───────────────────────────────────────────────────────────────
+--  ▸ File / version setup
+--───────────────────────────────────────────────────────────────
+local version     = "v0.2-dumper"
+local dateTag     = os.date("%d_%m_%y")
+local logName     = string.format("%d-%s-log.txt", game.PlaceId, dateTag)
+local dumpName    = string.format("%d-%s-dump.txt",game.PlaceId,dateTag)
+
+if options.SaveLogs and not isfile(logName) then
+    writefile(logName, string.format("Http-Dumper logs from %s\n\n", os.date("%d/%m/%y")))
+end
+if not isfile(dumpName) then
+    writefile(dumpName,"")   -- start empty; we append later
 end
 
--- Find patterns in obfuscated scripts
-local function FindPatterns(script)
-    local patterns = {
-        moonsec = script:match("This file was protected with MoonSec") ~= nil,
-        luraph = script:match("Luraph") ~= nil or script:match("LURAPH") ~= nil,
-        strings = {},
-        variables = {},
-        numbers = {},
-    }
-    
-    -- Extract strings
-    for str in script:gmatch("\"(.-[^\\])\"") do
-        table.insert(patterns.strings, str)
+--───────────────────────────────────────────────────────────────
+--  ▸ Local copies of globals (anti-tamper)
+--───────────────────────────────────────────────────────────────
+local clonef            = clonefunction
+local printf            = clonef(rconsoleprint)
+local append            = clonef(appendfile)
+local format            = clonef(string.format)
+local gsub              = clonef(string.gsub)
+local match             = clonef(string.match)
+local Pcall             = clonef(pcall)
+local Pairs             = clonef(pairs)
+local Type              = clonef(type)
+
+-- tiny helper to print + save at once
+local function logf(...)
+    local msg = format(...)
+    if options.SaveLogs then
+        append(logName, (msg:gsub("%%\27%[%d+m",""))) -- strip ANSI for file
     end
-    
-    -- Extract variable names
-    for var in script:gmatch("local%s+([%w_]+)") do
-        table.insert(patterns.variables, var)
-    end
-    
-    -- Extract standalone variable names
-    for var in script:gmatch("([%w_]+)%s*=") do
-        if not table.find(patterns.variables, var) then
-            table.insert(patterns.variables, var)
-        end
-    end
-    
-    -- Extract numbers
-    for num in script:gmatch("(%d+)") do
-        table.insert(patterns.numbers, tonumber(num))
-    end
-    
-    return patterns
+    return printf(msg)
 end
 
--- Function to analyze an obfuscated script
-local function AnalyzeScript(script)
-    local analysis = {
-        type = "unknown",
-        encrypted_strings = {},
-        vm_opcodes = {},
-        potential_keys = {},
-        chunks = {},
-        functions = {},
-    }
-    
-    -- Detect obfuscation type
-    if script:match("MoonSec") then
-        analysis.type = "moonsec"
-    elseif script:match("Luraph") then
-        analysis.type = "luraph"
-    end
-    
-    -- Find potential VM opcodes (numbers often used in VM-based obfuscation)
-    local number_frequencies = {}
-    for num in script:gmatch("(%d+)") do
-        num = tonumber(num)
-        if num <= 255 then -- Potential opcode
-            number_frequencies[num] = (number_frequencies[num] or 0) + 1
-            if number_frequencies[num] > 5 then
-                table.insert(analysis.vm_opcodes, num)
-            end
-        end
-    end
-    
-    -- Find encrypted strings (often appear as escaped hex)
-    for hex in script:gmatch("\\x([%x][%x])") do
-        table.insert(analysis.encrypted_strings, tonumber(hex, 16))
-    end
-    
-    -- Look for potential XOR keys (often small numbers used repeatedly)
-    for key, freq in pairs(number_frequencies) do
-        if key < 256 and freq > 10 then
-            table.insert(analysis.potential_keys, key)
-        end
-    end
-    
-    -- Detect table structure often used in VM bytecode
-    local table_count = 0
-    for _ in script:gmatch("{%s*{") do
-        table_count = table_count + 1
-    end
-    analysis.nested_tables = table_count
-    
-    return analysis
-end
+--───────────────────────────────────────────────────────────────
+--  ▸ Pretty MoonSec-style serializer
+--───────────────────────────────────────────────────────────────
+local indent, yield      = string.rep, task.wait
+local function ToMoon(t, depth, seen)
+    depth, seen          = depth or 0, seen or {}
+    if seen[t] then return "[table]:{ --[[cycle]] }" end
+    seen[t]              = true
 
--- Generate mock bytecode tables in the format requested
-local function GenerateBytecodeTable(analysis)
-    local bytecode = {
-        instructions = {},
-        constants = {},
-        protos = {},
-    }
-    
-    -- Add some sample instructions based on the analysis
-    local opcodes = {148, 80, 61, 260, 291, 36, 242}
-    for i = 1, math.min(#opcodes, 20) do
-        local instr = {
-            opcodes[i] or math.random(1, 255),
-            math.random(0, 5),
-            i == 2 and "MoonSec_StringsHiddenAttr" or math.random(0, 10),
-            i == 4 and "This file was protected with MoonSec V3" or math.random(0, 10)
-        }
-        table.insert(bytecode.instructions, instr)
-    end
-    
-    -- Add constants from discovered strings
-    for i, str in ipairs(analysis.encrypted_strings) do
-        if i <= 10 then
-            table.insert(bytecode.constants, string.char(str))
-        end
-    end
-    
-    -- Add discovered variables as potential upvalues
-    bytecode.upvalues = {}
-    for i, var in ipairs(analysis.variables or {}) do
-        if i <= 5 then
-            table.insert(bytecode.upvalues, var)
-        end
-    end
-    
-    return bytecode
-}
+    local pad            = indent("  ", depth)
+    local out            = {"[table]:{\n"}
+    local index          = 1
 
--- Function to create a formatted output in the specific format requested
-local function FormatDump(analysis, bytecode)
-    local output = ""
-    
-    -- Add main bytecode table
-    output = output .. "[table]:{\n"
-    output = output .. "  [1] = {\n"
-    
-    -- Add instructions
-    for i, instr in ipairs(bytecode.instructions) do
-        output = output .. "    [" .. i .. "] = {\n"
-        for j, v in ipairs(instr) do
-            if type(v) == "string" then
-                output = output .. "      [" .. j .. "] = \"" .. v .. "\",\n"
-            else
-                output = output .. "      [" .. j .. "] = " .. tostring(v) .. ",\n"
-            end
-        end
-        output = output .. "    },\n"
-    end
-    output = output .. "  },\n"
-    
-    -- Add constants section
-    output = output .. "  [2] = {\n"
-    for i, v in ipairs(bytecode.constants) do
-        if type(v) == "string" then
-            output = output .. "    [" .. i .. "] = \"" .. v .. "\",\n"
+    for k,v in next, t do
+        local keyStr     = Type(k) == "number" and ("[%d]"):format(k) or
+                           Type(k) == "string" and ('"%s"'):format(k) or "<key>"
+        table.insert(out, pad.."  "..keyStr.." = ")
+
+        if Type(v) == "table" then
+            table.insert(out, ToMoon(v, depth+1, seen))
+        elseif Type(v) == "string" then
+            table.insert(out, ('"%s"'):format(v:gsub("\\","\\\\"):gsub('"','\\"')))
+        elseif Type(v) == "function" then
+            table.insert(out, "<function>")
         else
-            output = output .. "    [" .. i .. "] = " .. tostring(v) .. ",\n"
+            table.insert(out, tostring(v))
         end
-    end
-    output = output .. "  },\n"
-    
-    -- Add vararg flag
-    output = output .. "  [3] = 0,\n"
-    
-    -- Add protos
-    output = output .. "  [4] = {\n"
-    output = output .. "  },\n"
-    
-    -- Close main table
-    output = output .. "}\n\n"
-    
-    -- Add empty table section
-    output = output .. "[table]:{\n}\n\n"
-    
-    -- Add string attributes table
-    output = output .. "[table]:{\n"
-    output = output .. "  \"MoonSec_StringsHiddenAttr\" = true,\n"
-    output = output .. "}\n"
-    
-    return output
-}
+        table.insert(out, ",\n")
 
--- Main function to dump an obfuscated script
-local function DumpObfuscatedScript(options)
-    if type(options) ~= "table" then
-        options = {script = options}
+        -- be gentle to weaker exploits
+        if index % 50 == 0 then yield() end
+        index = index + 1
     end
-    
-    local obfuscatedScript = options.script
-    if not obfuscatedScript then
-        print("Error: No script provided to dump!")
-        return false
+    table.insert(out, pad.."}")
+    return table.concat(out)
+end
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Byte-code => int-array helper
+--───────────────────────────────────────────────────────────────
+local function bytes(str)
+    local t = {}
+    for i = 1, #str do
+        t[i] = str:byte(i)
     end
-    
-    local format = options.format or "auto"
-    local saveFile = options.saveFile ~= false -- Default to true
-    local verbose = options.verbose ~= false -- Default to true
-    
-    -- Generate a random filename for the output
-    math.randomseed(os.time())
-    local fileName = "Obfuscated_" .. RandomString(8) .. ".lua"
-    
-    -- Analyze the script to find patterns
-    local patterns = FindPatterns(obfuscatedScript)
-    local analysis = AnalyzeScript(obfuscatedScript)
-    
-    -- Override detected format if specified
-    if format ~= "auto" then
-        analysis.type = format
-    end
-    
-    local bytecode = GenerateBytecodeTable(analysis)
-    
-    -- Create the dump content
-    local dumpContent = "-- Script dumped with MoonSec/Luraph Dumper\n"
-    dumpContent = dumpContent .. "-- Obfuscation type: " .. analysis.type .. "\n\n"
-    dumpContent = dumpContent .. FormatDump(analysis, bytecode)
-    
-    -- Write to file if enabled
-    if saveFile then
-        writefile(fileName, dumpContent)
-        if verbose then
-            print("Dumped obfuscated script to: " .. fileName)
-        end
-    end
-    
-    -- Return both the filename and the content
-    return {
-        fileName = saveFile and fileName or nil,
-        content = dumpContent,
-        analysis = {
-            type = analysis.type,
-            stringCount = #patterns.strings,
-            variableCount = #patterns.variables,
-            opcodeCount = #analysis.vm_opcodes
-        }
+    return t
+end
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Function deep-dump
+--───────────────────────────────────────────────────────────────
+local getuv     = getupvalue or debug.getupvalue
+local getconst  = debug.getconstants
+local getproto  = debug.getprotos or function() return {} end
+
+local function DumpFunction(fn, pool)
+    if not islclosure(fn) then return end
+    if pool[fn] then return end       -- avoid repeats
+    pool[fn] = true
+
+    local fDump = {
+        Constants   = getconst(fn),
+        Upvalues    = {},
+        Protos      = {},
+        Bytecode    = bytes(string.dump(fn)),
     }
+
+    -- up-values
+    for i = 1, math.huge do
+        local name, val = getuv(fn, i)
+        if not name then break end
+        fDump.Upvalues[name] = val
+    end
+
+    -- inner protos
+    for i, p in Pairs(getproto(fn)) do
+        if Type(p) == "function" then
+            fDump.Protos[i] = DumpFunction(p, pool)
+        end
+    end
+    return fDump
 end
 
--- Simple one-line usage wrapper
-return function(options)
-    return DumpObfuscatedScript(options)
+--───────────────────────────────────────────────────────────────
+--  ▸ Walk any Lua value and build a MoonSec-table
+--───────────────────────────────────────────────────────────────
+local function BuildDump(value)
+    local seen      = {}
+    local poolFn    = {}
+    local root      = {}
+
+    local function recur(v, slot)
+        if Type(v) == "table" then
+            local new = {}
+            root[slot] = new
+            seen[v] = new
+            for k,val in Pairs(v) do
+                local key = k
+                recur(val, key)
+            end
+        elseif Type(v) == "function" then
+            root[slot] = DumpFunction(v, poolFn)
+        else
+            root[slot] = v
+        end
+    end
+    recur(value, 1)
+    return root
 end
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Write a value (any Lua value) to file in MoonSec style
+--───────────────────────────────────────────────────────────────
+local function DumpToFile(tag, value)
+    local moon  = ToMoon(BuildDump(value))
+    append(dumpName, ("\n--[%s]----------------------------------------\n%s\n"):format(tag, moon))
+end
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Original HttpSpy internals we still need
+--───────────────────────────────────────────────────────────────
+local Serializer  = loadstring(game:HttpGet("https://raw.githubusercontent.com/NotDSF/leopard/main/rbx/leopard-syn.lua"))()
+Serializer.UpdateConfig({highlighting = options.Highlighting})
+
+local reqfunc     = (syn or http).request
+local libtype     = syn and "syn" or "http"
+local __request   -- forward decl
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Dump whole getgc on start (optional)
+--───────────────────────────────────────────────────────────────
+if options.DumpGCOnStart then
+    logf("[HttpDumper] Walking getgc… this may take a moment.\n")
+    local pool = {}
+    for _,v in next, getgc(true) do
+        if Type(v) == "function" then
+            DumpToFile("getgc_fn", v)
+        elseif Type(v) == "table" or Type(v) == "string" then
+            DumpToFile("getgc_val", v)
+        end
+    end
+    logf("[HttpDumper] getgc dump complete. Saved to %s\n\n", dumpName)
+end
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Hook http(s) requests (keeps original HttpSpy behaviour)
+--───────────────────────────────────────────────────────────────
+__request = hookfunction(reqfunc, newcclosure(function(req)
+    if Type(req) ~= "table" or Type(req.Url) ~= "string" then
+        return __request(req)      -- let weird calls through
+    end
+
+    -- print request like HttpSpy
+    logf("%s.request(%s)\n", libtype, Serializer.Serialize(req))
+
+    local ok, resp = Pcall(__request, req)
+    if not ok then error(resp, 0) end
+
+    -- optionally decode JSON
+    if options.AutoDecode and resp and Type(resp.Headers)=="table" then
+        local ctype = resp.Headers["Content-Type"]
+        if ctype and ctype:find("application/json") then
+            local ok2, body = pcall(game.HttpService.JSONDecode, game.HttpService, resp.Body)
+            if ok2 then resp.Body = body end
+        end
+    end
+
+    -- print response summary
+    if options.ShowResponse then
+        logf("↪ Response => %s\n\n", Serializer.Serialize(resp))
+    end
+
+    --──────────────────────
+    --  NEW: dump response
+    --──────────────────────
+    if options.DumpOnRequest and resp then
+        DumpToFile(resp.Url or "response", resp)
+    end
+
+    return resp
+end))
+
+--───────────────────────────────────────────────────────────────
+--  ▸ Friendly banner
+--───────────────────────────────────────────────────────────────
+logf(
+    "\nHttpDumper %s ready. Dumps go to: \27[32m%s\27[0m\n\n",
+    version, dumpName
+)
+
+--───────────────────────────────────────────────────────────────
+--  ▸ OPTIONAL: expose tiny API for your other scripts
+--───────────────────────────────────────────────────────────────
+if not options.API then return end
+
+local API = {}
+function API:Dump(value, tag)   DumpToFile(tag or "manual", value) end
+function API:DisableDump()      options.DumpOnRequest = false end
+function API:EnableDump()       options.DumpOnRequest = true end
+return API
