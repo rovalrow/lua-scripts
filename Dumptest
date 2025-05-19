@@ -1,5 +1,5 @@
 --[[=============================================================
-    HttpDumper v1
+    HttpDumper v0.2
     ▸ based on HttpSpy v1.1.3 by NotDSF
     ▸ adds constant / up-value / byte-code dumping
     ▸ produces MoonSec-style “[table]:{ … }” files
@@ -121,7 +121,7 @@ local function DumpFunction(fn, pool)
         Constants = getconst(fn),
         Upvalues = {},
         Protos = {},
-        Bytecode = bytes(string.dump(fn)),
+        Bytecode = bytes and bytes(string.dump(fn)) or string.dump(fn),
     }
 
     for i = 1, math.huge do
@@ -130,11 +130,12 @@ local function DumpFunction(fn, pool)
         fDump.Upvalues[name] = val
     end
 
-    for i, p in Pairs(getproto(fn)) do
-        if Type(p) == "function" then
+    for i, p in ipairs(getproto(fn)) do
+        if type(p) == "function" then
             fDump.Protos[i] = DumpFunction(p, pool)
         end
     end
+
     return fDump
 end
 
