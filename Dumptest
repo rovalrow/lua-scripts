@@ -1,5 +1,5 @@
 --[[=============================================================
-    HttpDumper v0.2
+    HttpDumper v1
     ▸ based on HttpSpy v1.1.3 by NotDSF
     ▸ adds constant / up-value / byte-code dumping
     ▸ produces MoonSec-style “[table]:{ … }” files
@@ -10,17 +10,15 @@
 --  ▸ Options
 --───────────────────────────────────────────────────────────────
 local options = ({...})[1] or {
-    AutoDecode       = true,   -- JSON-decode bodies automatically
-    Highlighting     = true,   -- keep HttpSpy’s ANSI colours
-    SaveLogs         = true,   -- keep HttpSpy’s rolling console log
+    AutoDecode       = true,
+    Highlighting     = true,
+    SaveLogs         = true,
     CLICommands      = true,
     ShowResponse     = true,
     API              = true,
-
-    -- dumper-specific
-    DumpGCOnStart    = true,   -- walk all of getgc(true) once at launch
-    DumpOnRequest    = true,   -- additionally dump data returned by each request
-    BlockedURLs      = {},     -- same as HttpSpy
+    DumpGCOnStart    = true,
+    DumpOnRequest    = true,
+    BlockedURLs      = {},
 }
 
 --───────────────────────────────────────────────────────────────
@@ -29,13 +27,13 @@ local options = ({...})[1] or {
 local version     = "v0.2-dumper"
 local dateTag     = os.date("%d_%m_%y")
 local logName     = string.format("%d-%s-log.txt", game.PlaceId, dateTag)
-local dumpName    = string.format("%d-%s-dump.txt",game.PlaceId,dateTag)
+local dumpName    = string.format("%d-%s-dump.txt", game.PlaceId, dateTag)
 
 if options.SaveLogs and not isfile(logName) then
     writefile(logName, string.format("Http-Dumper logs from %s\n\n", os.date("%d/%m/%y")))
 end
 if not isfile(dumpName) then
-    writefile(dumpName,"")   -- start empty; we append later
+    writefile(dumpName, "")
 end
 
 --───────────────────────────────────────────────────────────────
@@ -51,11 +49,10 @@ local Pcall             = clonef(pcall)
 local Pairs             = clonef(pairs)
 local Type              = clonef(type)
 
--- tiny helper to print + save at once
 local function logf(...)
     local msg = format(...)
     if options.SaveLogs then
-        append(logName, (msg:gsub("%%\27%[%d+m",""))) -- strip ANSI for file
+        append(logName, (msg:gsub("%%\27%[%d+m", "")))
     end
     return printf(msg)
 end
@@ -63,25 +60,26 @@ end
 --───────────────────────────────────────────────────────────────
 --  ▸ Pretty MoonSec-style serializer
 --───────────────────────────────────────────────────────────────
-local indent, yield      = string.rep, task.wait
+local indent, yield = string.rep, task.wait
 local function ToMoon(t, depth, seen)
-    depth, seen          = depth or 0, seen or {}
+    depth, seen = depth or 0, seen or {}
     if seen[t] then return "[table]:{ --[[cycle]] }" end
-    seen[t]              = true
+    seen[t] = true
 
-    local pad            = indent("  ", depth)
-    local out            = {"[table]:{\n"}
-    local index          = 1
+    local pad = indent("  ", depth)
+    local out = {"[table]:{\n"}
+    local index = 1
 
-    for k,v in next, t do
-        local keyStr     = Type(k) == "number" and ("[%d]"):format(k) or
-                           Type(k) == "string" and ('"%s"'):format(k) or "<key>"
+    for k, v in next, t do
+        local keyStr = Type(k) == "number" and ("[%d]"):format(k)
+                    or Type(k) == "string" and ('"%s"'):format(k)
+                    or "<key>"
         table.insert(out, pad.."  "..keyStr.." = ")
 
         if Type(v) == "table" then
             table.insert(out, ToMoon(v, depth+1, seen))
         elseif Type(v) == "string" then
-            table.insert(out, ('"%s"'):format(v:gsub("\\","\\\\"):gsub('"','\\"')))
+            table.insert(out, ('"%s"'):format(v:gsub("\\", "\\\\"):gsub('"', '\\"')))
         elseif Type(v) == "function" then
             table.insert(out, "<function>")
         else
@@ -89,7 +87,6 @@ local function ToMoon(t, depth, seen)
         end
         table.insert(out, ",\n")
 
-        -- be gentle to weaker exploits
         if index % 50 == 0 then yield() end
         index = index + 1
     end
@@ -117,24 +114,22 @@ local getproto  = debug.getprotos or function() return {} end
 
 local function DumpFunction(fn, pool)
     if not islclosure(fn) then return end
-    if pool[fn] then return end       -- avoid repeats
+    if pool[fn] then return end
     pool[fn] = true
 
     local fDump = {
-        Constants   = getconst(fn),
-        Upvalues    = {},
-        Protos      = {},
-        Bytecode    = bytes(string.dump(fn)),
+        Constants = getconst(fn),
+        Upvalues = {},
+        Protos = {},
+        Bytecode = bytes(string.dump(fn)),
     }
 
-    -- up-values
     for i = 1, math.huge do
         local name, val = getuv(fn, i)
         if not name then break end
         fDump.Upvalues[name] = val
     end
 
-    -- inner protos
     for i, p in Pairs(getproto(fn)) do
         if Type(p) == "function" then
             fDump.Protos[i] = DumpFunction(p, pool)
@@ -147,18 +142,17 @@ end
 --  ▸ Walk any Lua value and build a MoonSec-table
 --───────────────────────────────────────────────────────────────
 local function BuildDump(value)
-    local seen      = {}
-    local poolFn    = {}
-    local root      = {}
+    local seen = {}
+    local poolFn = {}
+    local root = {}
 
     local function recur(v, slot)
         if Type(v) == "table" then
             local new = {}
             root[slot] = new
             seen[v] = new
-            for k,val in Pairs(v) do
-                local key = k
-                recur(val, key)
+            for k, val in Pairs(v) do
+                recur(val, k)
             end
         elseif Type(v) == "function" then
             root[slot] = DumpFunction(v, poolFn)
@@ -174,27 +168,26 @@ end
 --  ▸ Write a value (any Lua value) to file in MoonSec style
 --───────────────────────────────────────────────────────────────
 local function DumpToFile(tag, value)
-    local moon  = ToMoon(BuildDump(value))
+    local moon = ToMoon(BuildDump(value))
     append(dumpName, ("\n--[%s]----------------------------------------\n%s\n"):format(tag, moon))
 end
 
 --───────────────────────────────────────────────────────────────
 --  ▸ Original HttpSpy internals we still need
 --───────────────────────────────────────────────────────────────
-local Serializer  = loadstring(game:HttpGet("https://raw.githubusercontent.com/NotDSF/leopard/main/rbx/leopard-syn.lua"))()
+local Serializer = loadstring(game:HttpGet("https://raw.githubusercontent.com/NotDSF/leopard/main/rbx/leopard-syn.lua"))()
 Serializer.UpdateConfig({highlighting = options.Highlighting})
 
-local reqfunc     = (syn or http).request
-local libtype     = syn and "syn" or "http"
-local __request   -- forward decl
+local reqfunc = (syn or http).request
+local libtype = syn and "syn" or "http"
+local __request
 
 --───────────────────────────────────────────────────────────────
 --  ▸ Dump whole getgc on start (optional)
 --───────────────────────────────────────────────────────────────
 if options.DumpGCOnStart then
     logf("[HttpDumper] Walking getgc… this may take a moment.\n")
-    local pool = {}
-    for _,v in next, getgc(true) do
+    for _, v in next, getgc(true) do
         if Type(v) == "function" then
             DumpToFile("getgc_fn", v)
         elseif Type(v) == "table" or Type(v) == "string" then
@@ -209,17 +202,15 @@ end
 --───────────────────────────────────────────────────────────────
 __request = hookfunction(reqfunc, newcclosure(function(req)
     if Type(req) ~= "table" or Type(req.Url) ~= "string" then
-        return __request(req)      -- let weird calls through
+        return __request(req)
     end
 
-    -- print request like HttpSpy
     logf("%s.request(%s)\n", libtype, Serializer.Serialize(req))
 
     local ok, resp = Pcall(__request, req)
     if not ok then error(resp, 0) end
 
-    -- optionally decode JSON
-    if options.AutoDecode and resp and Type(resp.Headers)=="table" then
+    if options.AutoDecode and resp and Type(resp.Headers) == "table" then
         local ctype = resp.Headers["Content-Type"]
         if ctype and ctype:find("application/json") then
             local ok2, body = pcall(game.HttpService.JSONDecode, game.HttpService, resp.Body)
@@ -227,14 +218,10 @@ __request = hookfunction(reqfunc, newcclosure(function(req)
         end
     end
 
-    -- print response summary
     if options.ShowResponse then
         logf("↪ Response => %s\n\n", Serializer.Serialize(resp))
     end
 
-    --──────────────────────
-    --  NEW: dump response
-    --──────────────────────
     if options.DumpOnRequest and resp then
         DumpToFile(resp.Url or "response", resp)
     end
@@ -245,10 +232,7 @@ end))
 --───────────────────────────────────────────────────────────────
 --  ▸ Friendly banner
 --───────────────────────────────────────────────────────────────
-logf(
-    "\nHttpDumper %s ready. Dumps go to: \27[32m%s\27[0m\n\n",
-    version, dumpName
-)
+logf("\nHttpDumper %s ready. Dumps go to: \27[32m%s\27[0m\n\n", version, dumpName)
 
 --───────────────────────────────────────────────────────────────
 --  ▸ OPTIONAL: expose tiny API for your other scripts
