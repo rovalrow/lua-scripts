@@ -1,0 +1,17 @@
+-- Define some variables
+local playerName = "Player123"
+local coins = 100
+local hasGamepass = true
+
+-- Combine the values into a message
+local message = "Hello, " .. playerName .. "! You have " .. coins .. " coins."
+
+-- Print the message
+print(message)
+
+-- Print whether the player has a gamepass
+if hasGamepass then
+    print(playerName .. " owns the gamepass!")
+else
+    print(playerName .. " does not own the gamepass.")
+end
