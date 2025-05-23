@@ -1,358 +1,260 @@
---  Be sure to run this BEFORE the script you want to inspect!
---  loadstring(game:HttpGet("<raw-url-to-this-file>"))({
---      SaveLogs       = true,
---      DumpGCOnStart  = true,
---      DumpOnRequest  = true,
---      BlockedURLs    = { }        -- {"discord.com", "google.com"} etc.
---  })
+--[[
+    HttpSpy v1.1.3
+]]
 
---[[=============================================================
-    FullLuaDumper v1.1
-    ▸ Constant / up-value / proto / VM byte-code dumper
-    ▸ Optional HTTP-request dump (kept for compatibility)
-    ▸ MoonSec-style "[table]:{ … }" output
-===============================================================]]
+if rconsoleprint then
+    rconsoleprint("https://eleutheri.com - #1 Whitelist Service\n\n")
+end;
 
-----------------------------------------------------------------
---  ▸ Options & file names
-----------------------------------------------------------------
-local defaults = {
-    SaveLogs       = true,
-    DumpGCOnStart  = true,
-    DumpOnRequest  = true,
-    BlockedURLs    = {},
-}
-local options = ({...})[1] or defaults
-for k,v in pairs(defaults) do                -- fill missing keys
-    if options[k] == nil then options[k] = v end
-end
+assert(syn or http, "Unsupported exploit (should support syn.request or http.request)");
 
-local ver       = "v1.1"
-local tag       = os.date("%d_%m_%y")
-local logName   = string.format("%d-%s-log.txt",  game.PlaceId, tag)
-local dumpName  = string.format("%d-%s-dump.txt", game.PlaceId, tag)
+local options = ({...})[1] or {
+    AutoDecode = true,
+    Highlighting = true,
+    SaveLogs = true,
+    CLICommands = true,
+    ShowResponse = true,
+    BlockedURLs = {},
+    API = true
+};
+local version = "v1.1.3";
+local logname = string.format("%d-%s-log.txt", game.PlaceId, os.date("%d_%m_%y"));
 
--- Check if filesystem functions exist
-if not isfile or not writefile or not appendfile then
-    warn("Missing required filesystem functions! This script requires an executor with file I/O capabilities.")
-    return
-end
+if options.SaveLogs then
+    writefile(logname, string.format("Http Logs from %s\n\n", os.date("%d/%m/%y")));
+end;
 
--- Check for file existence with pcall to avoid errors
-local function safeIsFile(filename)
-    local success = pcall(function() return isfile(filename) end)
-    return success and isfile(filename) or false
-end
+local Serializer = loadstring(game:HttpGet("https://raw.githubusercontent.com/NotDSF/leopard/main/rbx/leopard-syn.lua"))();
+local clonef = clonefunction;
+local structuredLog = {};
+local pconsole = clonef(rconsoleprint);
+local format = clonef(string.format);
+local gsub = clonef(string.gsub);
+local match = clonef(string.match);
+local append = clonef(appendfile);
+local Type = clonef(type);
+local crunning = clonef(coroutine.running);
+local cwrap = clonef(coroutine.wrap);
+local cresume = clonef(coroutine.resume);
+local cyield = clonef(coroutine.yield);
+local Pcall = clonef(pcall);
+local Pairs = clonef(pairs);
+local Error = clonef(error);
+local getnamecallmethod = clonef(getnamecallmethod);
+local blocked = options.BlockedURLs;
+local enabled = true;
+local reqfunc = (syn or http).request;
+local libtype = syn and "syn" or "http";
+local hooked = {};
+local proxied = {};
+local methods = {
+    HttpGet = not syn,
+    HttpGetAsync = not syn,
+    GetObjects = true,
+    HttpPost = not syn,
+    HttpPostAsync = not syn
+};
 
-local function safeWriteFile(filename, content)
-    pcall(function() writefile(filename, content) end)
-end
+Serializer.UpdateConfig({ highlighting = options.Highlighting });
 
-local function safeAppendFile(filename, content)
-    pcall(function() appendfile(filename, content) end)
-end
+local RecentCommit = game.HttpService:JSONDecode(game:HttpGet("https://api.github.com/repos/NotDSF/HttpSpy/commits?per_page=1&path=init.lua"))[1].commit.message;
+local OnRequest = Instance.new("BindableEvent");
 
-if options.SaveLogs and not safeIsFile(logName) then safeWriteFile(logName, "") end
-if not safeIsFile(dumpName) then safeWriteFile(dumpName, "") end
+local function printf(...)
+    local raw = format(...);
+    local clean = gsub(raw, "%\27%[%d+m", "");
 
-----------------------------------------------------------------
---  ▸ Fast clones & helpers
-----------------------------------------------------------------
-local cf = function(f) return type(clonefunction) == "function" and clonefunction(f) or f end
-local rf = function(...) 
-    if rconsoleprint then 
-        return rconsoleprint(...) 
-    else 
-        return print(...) 
-    end 
-end
+    if options.SaveLogs then
+        append(logname, clean);
+    end;
 
-local printf = cf(rf)
-local append = cf(function(file, content) safeAppendFile(file, content) end)
-local format = cf(string.format)
-local Type   = cf(type)
-local wait25 = function() task.wait(0.025) end
+    pconsole(raw);
+end;
 
-local function logf(fmt, ...)
-    local msg = format(fmt, ...)
-    if options.SaveLogs then 
-        local cleanMsg = msg:gsub("%%\27%[%d+m", "")
-        append(logName, cleanMsg) 
-    end
-    return printf(msg)
-end
+local function ConstantScan(constant)
+    for _, v in Pairs(getgc(true)) do
+        if type(v) == "function" and islclosure(v) and getfenv(v).script == getfenv(saveinstance).script and table.find(debug.getconstants(v), constant) then
+            return v;
+        end;
+    end;
+end;
 
-----------------------------------------------------------------
---  ▸ MoonSec-style serializer
-----------------------------------------------------------------
-local function ToMoon(t, depth, seen)
-    if Type(t) ~= "table" then return tostring(t) end
-    
-    depth, seen = depth or 0, seen or {}
-    if seen[t] then return "[table]:{ --[[cycle]] }" end
-    seen[t] = true
-    local pad   = string.rep("  ", depth)
-    local out   = {"[table]:{\n"}
-    local index = 1
-
-    for k,v in next, t do
-        local kstr = Type(k)=="number" and ("[%d]"):format(k)
-                   or Type(k)=="string" and ('"%s"'):format(k)
-                   or "<key>"
-        table.insert(out, pad.."  "..kstr.." = ")
-
-        if   Type(v)=="table"    then table.insert(out, ToMoon(v, depth+1, seen))
-        elseif Type(v)=="string" then table.insert(out, ('"%s"'):format(v:gsub("\\","\\\\"):gsub('"','\\"')))
-        elseif Type(v)=="function" then table.insert(out,"<function>")
-        else  table.insert(out, tostring(v)) end
-
-        table.insert(out, ",\n")
-        if index % 50 == 0 then wait25() end
-        index = index + 1
-    end
-    table.insert(out, pad.."}")
-    return table.concat(out)
-end
-
-----------------------------------------------------------------
---  ▸ VM helpers
-----------------------------------------------------------------
-local function checkDebugLibrary()
-    if not debug then
-        logf("[Error] Debug library is not available!\n")
-        return false
-    end
-    
-    -- Check required debug functions
-    local required = {
-        "getconstants", 
-        "getupvalue"
-    }
-    
-    for _, funcName in ipairs(required) do
-        if not debug[funcName] and not getfenv(0)[funcName] then
-            logf("[Warning] Missing debug function: %s\n", funcName)
-        end
-    end
-    
-    return true
-end
-
-local function bytes(s) 
-    if type(s) ~= "string" then return {} end
-    local t = {} 
-    for i = 1, #s do 
-        t[i] = s:byte(i) 
-    end 
-    return t 
-end
-
-local getuv = function(f, i)
-    if getupvalue then 
-        return getupvalue(f, i)
-    elseif debug.getupvalue then
-        return debug.getupvalue(f, i)
-    end
-    return nil
-end
-
-local getconst = function(f)
-    if debug.getconstants then
-        return debug.getconstants(f)
-    end
-    return {}
-end
-
-local getproto = function(f)
-    if debug.getprotos then
-        return debug.getprotos(f)
-    end
-    return {}
-end
-
-local islclosure = function(f)
-    if islclosure then
-        return islclosure(f)
-    elseif checkclosure then
-        return not checkclosure(f)
-    end
-    return type(f) == "function"
-end
-
-local function DumpFunction(fn, pool)
-    if type(fn) ~= "function" or not islclosure(fn) or pool[fn] then return "<seen>" end
-    pool[fn] = true
-    
-    local d = {
-        Constants = pcall(getconst, fn) and getconst(fn) or {},
-        Upvalues  = {},
-        Protos    = {},
-        Bytecode  = pcall(string.dump, fn) and bytes(string.dump(fn)) or {},
-    }
-    
-    -- Get upvalues safely
-    for i = 1, 255 do
-        local n, val = pcall(getuv, fn, i) and getuv(fn, i) or nil
-        if not n then break end
-        d.Upvalues[n] = val
-    end
-    
-    -- Get protos safely
-    local protos = pcall(getproto, fn) and getproto(fn) or {}
-    for i, p in ipairs(protos) do
-        if Type(p) == "function" then 
-            d.Protos[i] = DumpFunction(p, pool) 
-        end
-    end
-    
-    return d
-end
-
-local function BuildDump(v)
-    local seen, pool, root = {}, {}, {}
-    local function recur(val, slot)
-        if Type(val) == "table" then
-            local new = {} 
-            root[slot] = new 
-            seen[val] = new
-            for k, x in pairs(val) do 
-                pcall(function() recur(x, k) end)
-            end
-        elseif Type(val) == "function" then
-            root[slot] = DumpFunction(val, pool)
+local function DeepClone(tbl, cloned)
+    cloned = cloned or {};
+    for i, v in Pairs(tbl) do
+        if Type(v) == "table" then
+            cloned[i] = DeepClone(v);
         else
-            root[slot] = val
-        end
-    end
-    
-    pcall(function() recur(v, 1) end)
-    return root
-end
+            cloned[i] = v;
+        end;
+    end;
+    return cloned;
+end;
 
-local function DumpToFile(tag, val)
-    local success, dumpData = pcall(function() 
-        return ToMoon(BuildDump(val)) 
-    end)
-    
-    if success then
-        append(dumpName, format("\n--[%s]----------------------------------------\n%s\n",
-               tag, dumpData))
-    else
-        logf("[Error] Failed to dump %s: %s\n", tag, dumpData)
-    end
-end
+local function logToStructuredLog(key, value)
+    structuredLog[#structuredLog + 1] = {
+        [1] = 167,
+        [2] = 0,
+        [3] = key,
+        [4] = value,
+    };
+end;
 
-----------------------------------------------------------------
---  ▸ getgc dumper
-----------------------------------------------------------------
-local function DumpAllGC()
-    if not getgc then
-        logf("[Error] getgc function not available! Cannot dump garbage collector.\n")
-        return
-    end
-    
-    logf("[Dumper] Walking getgc...\n")
-    local count = 0
-    
+local __namecall, __request;
+__namecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+    local method = getnamecallmethod();
+    if methods[method] then
+        printf("game:%s(%s)\n\n", method, Serializer.FormatArguments(...));
+    end;
+    return __namecall(self, ...);
+end));
+
+__request = hookfunction(reqfunc, newcclosure(function(req)
+    if Type(req) ~= "table" then return __request(req); end;
+
+    local RequestData = DeepClone(req);
+    if not enabled then return __request(req); end;
+    if Type(RequestData.Url) ~= "string" then return __request(req); end;
+
+    if not options.ShowResponse then
+        printf("%s.request(%s)\n\n", libtype, Serializer.Serialize(RequestData));
+        return __request(req);
+    end;
+
+    local t = crunning();
+    cwrap(function()
+        if RequestData.Url and blocked[RequestData.Url] then
+            printf("%s.request(%s) -- blocked url\n\n", libtype, Serializer.Serialize(RequestData));
+            return cresume(t, {});
+        end;
+
+        if RequestData.Url then
+            local Host = match(RequestData.Url, "https?://([%w%.%-]+)/");
+            if Host and proxied[Host] then
+                RequestData.Url = gsub(RequestData.Url, Host, proxied[Host], 1);
+            end;
+        end;
+
+        OnRequest:Fire(RequestData);
+
+        local ok, ResponseData = Pcall(__request, RequestData);
+        if not ok then Error(ResponseData, 0); end;
+
+        local BackupData = {};
+        for i, v in Pairs(ResponseData) do
+            BackupData[i] = v;
+        end;
+
+        if BackupData.Headers and BackupData.Headers["Content-Type"] and match(BackupData.Headers["Content-Type"], "application/json") and options.AutoDecode then
+            local ok, res = Pcall(game.HttpService.JSONDecode, game.HttpService, BackupData.Body);
+            if ok then
+                BackupData.Body = res;
+            end;
+        end;
+
+        local keyName = RequestData.Headers and RequestData.Headers["User-Agent"] or RequestData.Url or "unknown";
+        local valueData = RequestData.Body or RequestData.Url or "nil";
+        logToStructuredLog(keyName, valueData);
+
+        printf("%s.request(%s)\n\nResponse Data: %s\n\n", libtype, Serializer.Serialize(RequestData), Serializer.Serialize(BackupData));
+        cresume(t, hooked[RequestData.Url] and hooked[RequestData.Url](ResponseData) or ResponseData);
+    end)();
+
+    return cyield();
+end));
+
+if request and replaceclosure then
     pcall(function()
-        for _, v in next, getgc(true) do
-            if Type(v) == "function" then 
-                DumpToFile("getgc_fn_" .. count, v)
-                count = count + 1
-            elseif Type(v) == "table" or Type(v) == "string" then 
-                DumpToFile("getgc_val_" .. count, v)
-                count = count + 1
-            end
-            
-            if count % 100 == 0 then
-                wait25()
-                logf("[Dumper] Processed %d objects...\n", count)
-            end
-        end
-    end)
-    
-    logf("[Dumper] getgc dump complete. Processed %d objects.\n", count)
-end
+        replaceclosure(request, reqfunc);
+    end);
+end;
 
-----------------------------------------------------------------
---  ▸ Validate environment and required functions
-----------------------------------------------------------------
-local function validateEnvironment()
-    local required = {
-        "getgc", "hookfunction", "newcclosure"
-    }
-    
-    local missing = {}
-    for _, funcName in ipairs(required) do
-        if not getfenv(0)[funcName] then
-            table.insert(missing, funcName)
-        end
-    end
-    
-    if #missing > 0 then
-        logf("[Warning] Missing functions: %s\n", table.concat(missing, ", "))
-        logf("[Warning] Some features may not work properly!\n")
-    end
-    
-    return checkDebugLibrary()
-}
+if syn and syn.websocket then
+    local WsConnect = debug.getupvalue(syn.websocket.connect, 1);
+    local WsBackup = hookfunction(WsConnect, function(...)
+        printf("syn.websocket.connect(%s)\n\n", Serializer.FormatArguments(...));
+        return WsConnect(...);
+    end);
+end;
 
--- Initialize the dumper
-local isValid = validateEnvironment()
-if not isValid then
-    logf("[Error] Critical functions missing! The dumper may not work correctly.\n")
-end
+if syn then
+    local func1 = ConstantScan("ZeZLm2hpvGJrD6OP8A3aEszPNEw8OxGb");
+    if func1 then
+        local HttpGet;
+        HttpGet = hookfunction(getupvalue(func1, 2), function(self, ...)
+            printf("game.HttpGet(game, %s)\n\n", Serializer.FormatArguments(...));
+            return HttpGet(self, ...);
+        end);
+    end;
 
--- Run GC dump if enabled
-if isValid and options.DumpGCOnStart then 
-    DumpAllGC() 
-end
+    local func2 = ConstantScan("gpGXBVpEoOOktZWoYECgAY31o0BlhOue");
+    if func2 then
+        local HttpPost;
+        HttpPost = hookfunction(getupvalue(func2, 2), function(self, ...)
+            printf("game.HttpPost(game, %s)\n\n", Serializer.FormatArguments(...));
+            return HttpPost(self, ...);
+        end);
+    end;
+end;
 
-----------------------------------------------------------------
---  ▸ (Optional) HTTP-request dump  ─ keeps original behaviour
-----------------------------------------------------------------
-if options.DumpOnRequest and hookfunction then
-    local reqfunc = (syn and syn.request)
-                 or (http and http.request)
-                 or rawget(getfenv(0), "request")
-    
-    if reqfunc then
-        local blocked = {}
-        for _, u in ipairs(options.BlockedURLs) do blocked[u] = true end
+for method, enabled in Pairs(methods) do
+    if enabled then
+        local b;
+        b = hookfunction(game[method], newcclosure(function(self, ...)
+            printf("game.%s(game, %s)\n\n", method, Serializer.FormatArguments(...));
+            return b(self, ...);
+        end));
+    end;
+end;
 
-        local hookSuccess, hookError = pcall(function()
-            hookfunction(reqfunc, newcclosure(function(req)
-                if Type(req) ~= "table" or Type(req.Url) ~= "string" then
-                    return reqfunc(req)
-                end
-                if blocked[req.Url] then return reqfunc(req) end
+if not debug.info(2, "f") then
+    pconsole("You are running an outdated version, please use the loadstring at https://github.com/NotDSF/HttpSpy\n");
+end;
 
-                logf("[HTTP] %s\n", req.Url)
-                local ok, resp = pcall(reqfunc, req)
-                if not ok then error(resp, 0) end
-                
-                pcall(function() DumpToFile("http_request", req) end)
-                if resp then pcall(function() DumpToFile("http_response", resp) end) end
-                
-                return resp
-            end))
-        end)
-        
-        if not hookSuccess then
-            logf("[Error] Failed to hook HTTP request function: %s\n", hookError)
-        end
-    else
-        logf("[!] No request function found; HTTP dump disabled.\n")
-    end
-end
+pconsole(format("HttpSpy %s (Creator: https://github.com/NotDSF)\nChange Logs:\n\t%s\nLogs are automatically being saved to: \27[32m%s\27[0m\n\n", version, RecentCommit, options.SaveLogs and logname or "(You aren't saving logs, enable SaveLogs if you want to save logs)"));
 
-----------------------------------------------------------------
---  ▸ Banner & API
-----------------------------------------------------------------
-logf("\n\27[36mFullLuaDumper %s\27[0m ready. Output => %s\n\n", ver, dumpName)
+if not options.API then return end;
 
-return {
-    Dump     = function(_, v, tag) pcall(function() DumpToFile(tag or "manual", v) end) end,
-    DumpGC   = DumpAllGC,
-    Log      = logf
-}
+local API = {};
+API.OnRequest = OnRequest.Event;
+
+function API:HookSynRequest(url, hook)
+    hooked[url] = hook;
+end;
+
+function API:ProxyHost(host, proxy)
+    proxied[host] = proxy;
+end;
+
+function API:RemoveProxy(host)
+    if not proxied[host] then
+        error("host isn't proxied", 0);
+    end;
+    proxied[host] = nil;
+end;
+
+function API:UnHookSynRequest(url)
+    if not hooked[url] then
+        error("url isn't hooked", 0);
+    end;
+    hooked[url] = nil;
+end;
+
+function API:BlockUrl(url)
+    blocked[url] = true;
+end;
+
+function API:WhitelistUrl(url)
+    blocked[url] = false;
+end;
+
+if options.SaveLogs then
+    local structureDump = "[table]:{\n";
+    for i, entry in ipairs(structuredLog) do
+        structureDump = structureDump .. format("  [%d] = {\n    [1] = %d,\n    [2] = %d,\n    [3] = %q,\n    [4] = %q,\n  },\n", i, entry[1], entry[2], entry[3], entry[4]);
+    end;
+    structureDump = structureDump .. "}\n";
+    append(logname, "\n\n" .. structureDump);
+end;
+
+return API;
